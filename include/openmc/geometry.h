@@ -8,10 +8,38 @@
 #include "openmc/constants.h"
 #include "openmc/vector.h"
 
+#include <unordered_set>
+#include <algorithm>
+
 namespace openmc {
 
 class BoundaryInfo;
 class GeometryState;
+
+//==============================================================================
+// Overlap checking types
+//==============================================================================
+
+struct OverlapKey {
+  int universe_id;
+  int cell1_id;
+  int cell2_id;
+
+  bool operator==(const OverlapKey& other) const {
+    return universe_id == other.universe_id &&
+           cell1_id == other.cell1_id &&
+           cell2_id == other.cell2_id;
+  }
+};
+
+struct OverlapKeyHash {
+  std::size_t operator()(const OverlapKey& k) const {
+    std::size_t h1 = std::hash<int>{}(k.universe_id);
+    std::size_t h2 = std::hash<int>{}(k.cell1_id);
+    std::size_t h3 = std::hash<int>{}(k.cell2_id);
+    return h1 ^ ((h2 ^ h3) << 1);
+  }
+};
 
 //==============================================================================
 // Global variables
@@ -23,6 +51,7 @@ extern int root_universe;      //!< Index of root universe
 extern "C" int n_coord_levels; //!< Number of CSG coordinate levels
 
 extern vector<int64_t> overlap_check_count;
+extern std::unordered_set<OverlapKey, OverlapKeyHash> overlap_pairs; // Initialize unordered map for unique cell overlaps 
 
 } // namespace model
 

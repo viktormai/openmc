@@ -25,6 +25,7 @@ int root_universe {-1};
 int n_coord_levels;
 
 vector<int64_t> overlap_check_count;
+std::unordered_set<OverlapKey, OverlapKeyHash> overlap_pairs;
 
 } // namespace model
 
@@ -35,6 +36,7 @@ vector<int64_t> overlap_check_count;
 bool check_cell_overlap(GeometryState& p, bool error)
 {
   int n_coord = p.n_coord();
+  bool found_overlap = false;
 
   // Loop through each coordinate level
   for (int j = 0; j < n_coord; j++) {
@@ -45,20 +47,28 @@ bool check_cell_overlap(GeometryState& p, bool error)
       Cell& c = *model::cells[index_cell];
       if (c.contains(p.coord(j).r(), p.coord(j).u(), p.surface())) {
         if (index_cell != p.coord(j).cell()) {
-          if (error) {
-            fatal_error(
-              fmt::format("Overlapping cells detected: {}, {} on universe {}",
-                c.id_, model::cells[p.coord(j).cell()]->id_, univ.id_));
+          
+          // Create the overlap key based on the current universe and the overlapping
+          // cells. Order should not matter; Cell 1 + Cell 2 overlap same as Cell 2 + Cell 1
+          int a = std::min(index_cell, p.coord(j).cell());
+          int b = std::max(index_cell, p.coord(j).cell());
+          OverlapKey key{p.coord(j).universe(), a, b};
+
+          // Store in global set (thread safe)
+          #pragma omp critical(OverlapStore)
+          {
+            model::overlap_pairs.insert(key);
           }
-          return true;
+          found_overlap = true;
+          
+        } else {
+          #pragma omp atomic
+          ++model::overlap_check_count[index_cell];
         }
-#pragma omp atomic
-        ++model::overlap_check_count[index_cell];
       }
     }
   }
-
-  return false;
+  return found_overlap;
 }
 
 //==============================================================================

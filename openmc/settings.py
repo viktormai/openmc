@@ -322,6 +322,8 @@ class Settings:
         theory manual.
     survival_biasing : bool
         Indicate whether survival biasing is to be used
+    check_overlaps : bool
+        Indicate whether check overlaps should be used
     tabular_legendre : dict
         Determines if a multi-group scattering moment kernel expanded via
         Legendre polynomials is to be converted to a tabular distribution or
@@ -432,6 +434,9 @@ class Settings:
         self._surface_grazing_ratio = None
         self._survival_biasing = None
         self._free_gas_threshold = None
+
+        # Set check_overlaps flag
+        self._check_overlaps = None
 
         # Shannon entropy mesh
         self._entropy_mesh = None
@@ -780,6 +785,15 @@ class Settings:
     def survival_biasing(self, survival_biasing: bool):
         cv.check_type('survival biasing', survival_biasing, bool)
         self._survival_biasing = survival_biasing
+
+    @property
+    def check_overlaps(self) -> bool:
+        return self._check_overlaps
+
+    @check_overlaps.setter
+    def check_overlaps(self, check_overlaps: bool):
+        cv.check_type('check overlaps', check_overlaps, bool)
+        self._check_overlaps = check_overlaps
 
     @property
     def entropy_mesh(self) -> RegularMesh:
@@ -1736,6 +1750,11 @@ class Settings:
             element = ET.SubElement(root, "survival_biasing")
             element.text = str(self._survival_biasing).lower()
 
+    def _create_check_overlaps_subelement(self, root):
+        if self._check_overlaps is not None:
+            element = ET.SubElement(root, "check_overlaps")
+            element.text = str(self._check_overlaps).lower()
+
     def _create_cutoff_subelement(self, root):
         if self._cutoff is not None:
             element = ET.SubElement(root, "cutoff")
@@ -2278,6 +2297,11 @@ class Settings:
         if text is not None:
             self.survival_biasing = text in ('true', '1')
 
+    def _check_overlaps_from_xml_element(self, root):
+        text = get_text(root, 'check_overlaps')
+        if text is not None:
+            self.check_overlaps = text in ('true', '1')
+
     def _cutoff_from_xml_element(self, root):
         elem = root.find('cutoff')
         if elem is not None:
@@ -2637,6 +2661,7 @@ class Settings:
         self._create_use_decay_photons_subelement(element)
         self._create_source_rejection_fraction_subelement(element)
         self._create_free_gas_threshold_subelement(element)
+        self._create_check_overlaps_subelement(element)
 
         # Clean the indentation in the file to be user-readable
         clean_indentation(element)
@@ -2755,6 +2780,7 @@ class Settings:
         settings._use_decay_photons_from_xml_element(elem)
         settings._source_rejection_fraction_from_xml_element(elem)
         settings._free_gas_threshold_from_xml_element(elem)
+        settings._check_overlaps_from_xml_element(elem)
 
         return settings
 

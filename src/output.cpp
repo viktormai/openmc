@@ -266,6 +266,30 @@ void print_overlap_check()
       fmt::print(" {}", id);
     }
     fmt::print("\n");
+
+    // Report actual overlapping cell pairs
+    if (!model::overlap_pairs.empty()) {
+      header("overlapping cells detected", 1);
+      fmt::print(" {:<12} {:<12} {:<12}\n", "Cell A ID", "Cell B ID", "Universe ID");
+      fmt::print(" {}\n", std::string(38, '-'));
+
+      // Prints the names of overlapping cells, if name is empty prints the IDs instead
+      for (const auto& key : model::overlap_pairs) {
+        std::string name_a = model::cells[key.cell1_id]->name_.empty() 
+        ? std::to_string(model::cells[key.cell1_id]->id_)
+        : model::cells[key.cell1_id]->name_;
+
+        std::string name_b = model::cells[key.cell2_id]->name_.empty()
+        ? std::to_string(model::cells[key.cell2_id]->id_)
+        : model::cells[key.cell2_id]->name_;
+
+fmt::print(" {:<20} {:<20} {:<12}\n", name_a, name_b, key.universe_id);
+      }
+      fatal_error(fmt::format(
+        "{} unique overlapping cell pair(s) detected. "
+        "Check the region definitions of the cells listed above.",
+        model::overlap_pairs.size()));
+    }
   }
 }
 

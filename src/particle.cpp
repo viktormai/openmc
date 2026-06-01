@@ -838,10 +838,12 @@ void Particle::cross_periodic_bc(
 void Particle::mark_as_lost(const char* message)
 {
   // Print warning and write lost particle file
-  warning(message);
-  if (settings::max_write_lost_particles < 0 ||
-      simulation::n_lost_particles < settings::max_write_lost_particles) {
-    write_restart();
+  if (!settings::check_overlaps) {
+    warning(message);
+    if (settings::max_write_lost_particles < 0 ||
+        simulation::n_lost_particles < settings::max_write_lost_particles) {
+      write_particle_track(*this);
+    }
   }
   // Increment number of lost particles
   wgt() = 0.0;
@@ -856,7 +858,9 @@ void Particle::mark_as_lost(const char* message)
   // reached
   if (simulation::n_lost_particles >= settings::max_lost_particles &&
       simulation::n_lost_particles >= settings::rel_max_lost_particles * n) {
-    fatal_error("Maximum number of lost particles has been reached.");
+    if (!settings::check_overlaps || model::overlap_pairs.empty()) {
+      fatal_error("Maximum number of lost particles has been reached.");
+    }
   }
 }
 

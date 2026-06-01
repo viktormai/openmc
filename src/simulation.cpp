@@ -8,6 +8,7 @@
 #include "openmc/error.h"
 #include "openmc/event.h"
 #include "openmc/geometry_aux.h"
+#include "openmc/geometry.h"
 #include "openmc/ifp.h"
 #include "openmc/material.h"
 #include "openmc/message_passing.h"
@@ -288,6 +289,14 @@ int openmc_next_batch(int* status)
   }
 
   finalize_batch();
+
+  if (settings::check_overlaps && !model::overlap_pairs.empty()) {
+    print_overlap_check();
+    if (status) {
+      *status = STATUS_EXIT_MAX_BATCH;
+    }
+    return 0;
+  }
 
   // Check simulation ending criteria
   if (status) {
