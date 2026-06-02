@@ -33,8 +33,11 @@ std::unordered_set<OverlapKey, OverlapKeyHash> overlap_pairs;
 // Non-member functions
 //==============================================================================
 
-bool check_cell_overlap(GeometryState& p, bool error)
+OverlapResult check_cell_overlap(GeometryState& p)
 {
+  // Overlap Result object
+  OverlapResult result;
+
   int n_coord = p.n_coord();
   bool found_overlap = false;
 
@@ -50,16 +53,20 @@ bool check_cell_overlap(GeometryState& p, bool error)
           
           // Create the overlap key based on the current universe and the overlapping
           // cells. Order should not matter; Cell 1 + Cell 2 overlap same as Cell 2 + Cell 1
-          int a = std::min(index_cell, p.coord(j).cell());
-          int b = std::max(index_cell, p.coord(j).cell());
-          OverlapKey key{p.coord(j).universe(), a, b};
+          int cell_a = model::cells[index_cell]->id_;
+          int cell_b = model::cells[p.coord(j).cell()]->id_;
+          int a = std::min(cell_a, cell_b);
+          int b = std::max(cell_a, cell_b);
+          OverlapKey key{univ.id_, a, b};
 
           // Store in global set (thread safe)
           #pragma omp critical(OverlapStore)
           {
             model::overlap_pairs.insert(key);
           }
-          found_overlap = true;
+          result.found = true;
+          result.key = key;
+          return result;
           
         } else {
           #pragma omp atomic
@@ -68,7 +75,7 @@ bool check_cell_overlap(GeometryState& p, bool error)
       }
     }
   }
-  return found_overlap;
+  return result;
 }
 
 //==============================================================================

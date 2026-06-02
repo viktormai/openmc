@@ -71,10 +71,14 @@ void IdData::set_value(size_t y, size_t x, const GeometryState& p, int level)
   }
 }
 
-void IdData::set_overlap(size_t y, size_t x)
+void IdData::set_overlap(size_t y, size_t x, const OverlapKey& key)
 {
   for (size_t k = 0; k < data_.shape(2); ++k)
     data_(y, x, k) = OVERLAP;
+
+  // Adds to new container which maps pixels to overlap information
+  size_t pix = y * data_.shape(1) + x;
+  overlap_pixels_[pix] = key;
 }
 
 PropertyData::PropertyData(size_t h_res, size_t v_res)

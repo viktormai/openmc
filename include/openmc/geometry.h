@@ -41,6 +41,11 @@ struct OverlapKeyHash {
   }
 };
 
+struct OverlapResult {
+  bool found = false;
+  OverlapKey key{-1, -1, -1};
+};
+
 //==============================================================================
 // Global variables
 //==============================================================================
@@ -68,7 +73,7 @@ inline bool coincident(double d1, double d2)
 //! Check for overlapping cells at a particle's position.
 //==============================================================================
 
-bool check_cell_overlap(GeometryState& p, bool error = true);
+OverlapResult check_cell_overlap(GeometryState& p);
 
 //==============================================================================
 //! Get the cell instance for a particle at the specified universe level
