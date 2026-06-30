@@ -175,6 +175,15 @@ struct PropertyData {
   tensor::Tensor<double> data_; //!< 2D array of temperature & density data
 };
 
+struct SurfaceCrossing {
+    int32_t surface_id;     // OpenMC surface ID (user-facing)
+    int32_t surface_index;  // internal index into model::surfaces
+    double  u_pos;          // exact position along the row in real-space cm
+    int32_t row;            // which pixel row (v pixel index)
+    int32_t from_cell_id;   // cell being left
+    int32_t to_cell_id;     // cell being entered
+};
+
 struct RasterData {
   // Constructor
   RasterData(size_t h_res, size_t v_res, bool include_filter = false);
@@ -193,6 +202,10 @@ struct RasterData {
 
   // Vector for storing overlaps to later be flattened and sent through the API
   std::vector<std::vector<OverlapKey>> pixel_overlaps_;
+
+  // Vector for storing surface crossing information
+  std::vector<std::vector<SurfaceCrossing>> surface_crossings_;
+
 };
 
 //===============================================================================
@@ -203,6 +216,7 @@ class SlicePlotBase {
 public:
   template<class T>
   T get_map(int32_t filter_index = -1) const;
+  std::vector<std::vector<SurfaceCrossing>> compute_surface_crossings() const;
 
   enum class PlotBasis { xy = 1, xz = 2, yz = 3 };
 
@@ -572,6 +586,19 @@ private:
   int orig_hit_id_ {-1};
 
   RGBColor result_color_;
+};
+
+// Class for running ray tracing on pots to get surface IDs
+class SliceRay : public Ray {
+public:
+    SliceRay(Position r, Direction u,
+             std::vector<SurfaceCrossing>& crossings)
+        : Ray(r, u), crossings_(crossings) {}
+
+    void on_intersection() override;
+
+private:
+    std::vector<SurfaceCrossing>& crossings_;
 };
 
 //===============================================================================

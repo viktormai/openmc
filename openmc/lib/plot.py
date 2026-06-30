@@ -81,6 +81,7 @@ _dll.openmc_slice_data.argtypes = [
     c_int32,                 # filter_index
     POINTER(c_int32),        # geom_data
     POINTER(c_double),       # property_data (can be None)
+    c_bool,                  # compute_surface_crossings
 ]
 _dll.openmc_slice_data.restype = c_int
 _dll.openmc_slice_data.errcheck = _error_handler
@@ -88,7 +89,7 @@ _dll.openmc_slice_data.errcheck = _error_handler
 
 def slice_data(origin, width=None, basis='xy', u_span=None, v_span=None,
                 pixels=None, show_overlaps=False, level=-1, filter=None,
-                include_properties=True):
+                include_properties=True, surface_crossings=False):
     """Generate a 2D raster of geometry and property data for plotting.
 
     Parameters
@@ -215,6 +216,7 @@ def slice_data(origin, width=None, basis='xy', u_span=None, v_span=None,
         filter_index,
         geom_data.ctypes.data_as(POINTER(c_int32)),
         prop_ptr
+        c_bool(surface_crossings)
     )
 
     return geom_data, property_data
@@ -278,6 +280,41 @@ def slice_data_overlap_info(x, y):
 
     return cell1, cell2, universe
 
+# Wrapping for surface crossing function
+def slice_surface_crossing_count():
+    count =c_int32()
+    _dll.openmc_slice_surface_crossing_count(count)
+    return count.value
+
+def slice_surface_crossing_data():
+    n = slice_surface_crossing_count()
+    if n == 0:
+        return None
+
+    # allocate numpy arrays of the right size
+    surface_ids  = np.empty(n, dtype=np.int32)
+    u_positions  = np.empty(n, dtype=np.float64)
+    row_indices  = np.empty(n, dtype=np.int32)
+    from_cell_ids = np.empty(n, dtype=np.int32)
+    to_cell_ids  = np.empty(n, dtype=np.int32)
+
+    _dll.openmc_slice_surface_crossing_data(
+        surface_ids.ctypes.data_as(POINTER(c_int32)),
+        u_positions.ctypes.data_as(POINTER(c_double)),
+        row_indices.ctypes.data_as(POINTER(c_int32)),
+        from_cell_ids.ctypes.data_as(POINTER(c_int32)),
+        to_cell_ids.ctypes.data_as(POINTER(c_int32)),
+    )
+
+    return {
+        "surface_ids":   surface_ids,
+        "u_positions":   u_positions,
+        "row_indices":   row_indices,
+        "from_cell_ids": from_cell_ids,
+        "to_cell_ids":   to_cell_ids,
+    }
+
+
 _dll.openmc_slice_data_overlap_count.argtypes = [c_int32, c_int32, POINTER(c_int32)]
 _dll.openmc_slice_data_overlap_count.restype = c_int
 _dll.openmc_slice_data_overlap_count.errcheck = _error_handler
@@ -285,6 +322,15 @@ _dll.openmc_slice_data_overlap_count.errcheck = _error_handler
 _dll.openmc_slice_data_overlap_info.argtypes = [c_int32, c_int32, POINTER(c_int32), POINTER(c_int32), POINTER(c_int32)]
 _dll.openmc_slice_data_overlap_info.restype = c_int
 _dll.openmc_slice_data_overlap_info.errcheck = _error_handler
+
+_dll.openmc_slice_surface_crossing_count.argtypes = [POINTER(c_int32)]
+_dll.openmc_slice_surface_crossing_count.restype = c_int
+_dll.openmc_slice_surface_crossing_count.errcheck = _error_handler
+
+_dll.openmc_slice_surface_crossing_data.argtypes = [POINTER(c_int32), POINTER(c_double),
+POINTER(c_int32), POINTER(c_int32), POINTER(c_int32)]
+_dll.openmc_slice_surface_crossing_data.restype = c_int
+_dll.openmc_slice_surface_crossing_data.errcheck = _error_handler
 
 _dll.openmc_get_plot_index.argtypes = [c_int32, POINTER(c_int32)]
 _dll.openmc_get_plot_index.restype = c_int
