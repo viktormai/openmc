@@ -1,44 +1,61 @@
-from collections.abc import Mapping from ctypes import(
-  c_bool, c_int, c_size_t, c_int32, c_double, c_uint8, Structure, POINTER)
+from collections.abc import Mapping
+from ctypes import (c_bool, c_int, c_size_t, c_int32,
+                    c_double, c_uint8, Structure, POINTER)
 from weakref import WeakValueDictionary
 
-  from..exceptions import AllocationError,
-  InvalidIDError from.import _dll from.core import _FortranObjectWithID
-      from.error import _error_handler
+from ..exceptions import AllocationError, InvalidIDError
+from . import _dll
+from .core import _FortranObjectWithID
+from .error import _error_handler
 
-        import numpy as np import warnings
+import numpy as np
+import warnings
 
-    class _Position(Structure)
-  : ""
-    "Definition of an xyz location in space with underlying c-types
 
-    C
-    - type Attributes-- -- -- -- -- -- -- -- -x
-  : c_double Position's x value (default: 0.0) y
-  : c_double Position's y value (default: 0.0) z
-  : c_double Position's z value (default: 0.0) ""
-                                               "
-    _fields_ = [ ('x', c_double), ('y', c_double), ('z', c_double) ]
+class _Position(Structure):
+    """Definition of an xyz location in space with underlying c-types
 
-               def __getitem__(self, idx)
-  : if idx == 0 : return self.x elif idx == 1 : return self.y elif idx ==
-    2 : return self.z else
-  : raise IndexError(f "{idx} index is invalid for _Position")
+    C-type Attributes
+    -----------------
+    x : c_double
+        Position's x value (default: 0.0)
+    y : c_double
+        Position's y value (default: 0.0)
+    z : c_double
+        Position's z value (default: 0.0)
+    """
+    _fields_ = [('x', c_double),
+                ('y', c_double),
+                ('z', c_double)]
 
-      def __setitem__(self, idx, val)
-  : if idx
-    == 0 : self.x = val elif idx == 1 : self.y = val elif idx == 2 : self.z =
-                                                   val else
-  : raise IndexError(f "{idx} index is invalid for _Position")
+    def __getitem__(self, idx):
+        if idx == 0:
+            return self.x
+        elif idx == 1:
+            return self.y
+        elif idx == 2:
+            return self.z
+        else:
+            raise IndexError(f"{idx} index is invalid for _Position")
 
-      def __repr__(self)
-  : return f "({self.x}, {self.y}, {self.z})"
+    def __setitem__(self, idx, val):
+        if idx == 0:
+            self.x = val
+        elif idx == 1:
+            self.y = val
+        elif idx == 2:
+            self.z = val
+        else:
+            raise IndexError(f"{idx} index is invalid for _Position")
 
-    def _extract_slice_data_args(plot)
-  : ""
-    "Convert a legacy plot-like object into slice_data keyword arguments."
-    ""
-try : kwargs = {
+    def __repr__(self):
+        return f"({self.x}, {self.y}, {self.z})"
+
+
+def _extract_slice_data_args(plot):
+    """Convert a legacy plot-like object into slice_data keyword arguments."""
+    try:
+        kwargs = {
             'origin': tuple(plot.origin),
             'width': (plot.width, plot.height),
             'basis': plot.basis,
@@ -165,13 +182,13 @@ def slice_data(origin, width=None, basis='xy', u_span=None, v_span=None,
     if origin.shape != (3,):
         raise ValueError("origin must be a length-3 sequence.")
 
-#Prepare ctypes arrays
+    # Prepare ctypes arrays
     origin_arr = (c_double * 3)(*origin)
     u_span_arr = (c_double * 3)(*u_span)
     v_span_arr = (c_double * 3)(*v_span)
     pixels_arr = (c_size_t * 2)(*pixels)
 
-#Get internal filter index from filter ID if filter is provided
+    # Get internal filter index from filter ID if filter is provided
     if filter is not None:
         filter_index = c_int32()
         _dll.openmc_get_filter_index(filter.id, filter_index)
@@ -179,7 +196,7 @@ def slice_data(origin, width=None, basis='xy', u_span=None, v_span=None,
     else:
         filter_index = -1
 
-#Allocate output arrays with dynamic size based on filter
+    # Allocate output arrays with dynamic size based on filter
     n_geom_fields = 4 if filter is not None else 3
     geom_data = np.zeros((pixels[1], pixels[0], n_geom_fields), dtype=np.int32)
     if include_properties:
@@ -198,7 +215,7 @@ def slice_data(origin, width=None, basis='xy', u_span=None, v_span=None,
         level,
         filter_index,
         geom_data.ctypes.data_as(POINTER(c_int32)),
-        prop_ptr
+        prop_ptr,
         c_bool(surface_crossings)
     )
 
@@ -239,7 +256,8 @@ def property_map(plot):
     _, prop_data = slice_data(include_properties=True, **kwargs)
     return prop_data
 
-#Python wrappings for overlap functions
+
+# Python wrappings for overlap functions
 
 def slice_data_overlap_count(x, y):
     count = c_int32()
@@ -262,7 +280,7 @@ def slice_data_overlap_info(x, y):
 
     return cell1, cell2, universe
 
-#Wrapping for surface crossing function
+# Wrapping for surface crossing function
 def slice_surface_crossing_count():
     count =c_int32()
     _dll.openmc_slice_surface_crossing_count(count)
@@ -273,7 +291,7 @@ def slice_surface_crossing_data():
     if n == 0:
         return None
 
-#allocate numpy arrays of the right size
+    # allocate numpy arrays of the right size
     surface_ids  = np.empty(n, dtype=np.int32)
     u_positions  = np.empty(n, dtype=np.float64)
     row_indices  = np.empty(n, dtype=np.int32)
@@ -653,7 +671,7 @@ class SolidRayTracePlot(_FortranObjectWithID):
         _dll.openmc_solidraytrace_plot_set_diffuse_fraction(
             self._index, float(value))
 
-#Backward - compatible setter aliases
+    # Backward-compatible setter aliases
     def set_pixels(self, width, height):
         self.pixels = (width, height)
 
@@ -682,7 +700,8 @@ class SolidRayTracePlot(_FortranObjectWithID):
 class _PlotMapping(Mapping):
     def __getitem__(self, key):
         index = c_int32()
-  try : _dll.openmc_get_plot_index(key, index)
+        try:
+            _dll.openmc_get_plot_index(key, index)
         except (AllocationError, InvalidIDError) as e:
             raise KeyError(str(e))
         return SolidRayTracePlot(index=index.value)

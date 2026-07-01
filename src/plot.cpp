@@ -1908,8 +1908,23 @@ void SliceRay::on_intersection()
   sc.surface_index = boundary().surface_index();
   sc.surface_id = model::surfaces.at(sc.surface_index)->id_;
   sc.u_pos = traversal_distance_;
-  sc.from_cell_id = model::cells.at(cell_last(0))->id_;
-  sc.to_cell_id = model::cells.at(lowest_coord().cell())->id_;
+
+  // Guard against invalid cell index at ray start
+  int32_t last_cell_idx = cell_last(0);
+  if (last_cell_idx >= 0 &&
+      static_cast<size_t>(last_cell_idx) < model::cells.size()) {
+    sc.from_cell_id = model::cells.at(last_cell_idx)->id_;
+  } else {
+    sc.from_cell_id = -1;
+  }
+
+  int32_t next_cell_idx = lowest_coord().cell();
+  if (next_cell_idx >= 0 &&
+      static_cast<size_t>(next_cell_idx) < model::cells.size()) {
+    sc.to_cell_id = model::cells.at(next_cell_idx)->id_;
+  } else {
+    sc.to_cell_id = -1;
+  }
   crossings_.push_back(sc);
 }
 
@@ -1934,10 +1949,12 @@ SlicePlotBase::compute_surface_crossings() const
     // left edge of this row, same geometry as get_map
     Position row_start = top_left - v_step * static_cast<double>(row);
 
-    SliceRay ray(row_start, u_hat, crossings_by_row[row]);
-    ray.trace(); // calls on_intersection() at every boundary
+    try {
+      SliceRay ray(row_start, u_hat, crossings_by_row[row]);
+      ray.trace();
+    } catch (const std::exception&) {
+    }
   }
-
   return crossings_by_row;
 }
 
@@ -2188,13 +2205,20 @@ extern "C" int openmc_compute_surface_crossings()
     return OPENMC_E_UNASSIGNED;
   }
 
+  // Guard against unreasonably large plots
+  constexpr size_t MAX_ROWS = 4000;
+  if (model::last_slice_data->pixel_dims_[1] > MAX_ROWS) {
+    set_errmsg("Plot resolution too high for surface crossing computation.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
+
   // Uses saved parameters from plot needed to get surface crossings
   SlicePlotBase plot_params;
   plot_params.origin_ = model::last_slice_data->origin_;
   plot_params.u_span_ = model::last_slice_data->u_span_;
   plot_params.v_span_ = model::last_slice_data->v_span_;
-  plot_params.pixels_[0] = model::last_slice_data->h_res_;
-  plot_params.pixels_[1] = model::last_slice_data->v_res_;
+  plot_params.pixels_[0] = model::last_slice_data->pixel_dims_[0];
+  plot_params.pixels_[1] = model::last_slice_data->pixel_dims_[1];
 
   model::last_slice_data->surface_crossings_ =
     plot_params.compute_surface_crossings();
