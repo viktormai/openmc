@@ -176,12 +176,12 @@ struct PropertyData {
 };
 
 struct SurfaceCrossing {
-    int32_t surface_id;     // OpenMC surface ID (user-facing)
-    int32_t surface_index;  // internal index into model::surfaces
-    double  u_pos;          // exact position along the row in real-space cm
-    int32_t row;            // which pixel row (v pixel index)
-    int32_t from_cell_id;   // cell being left
-    int32_t to_cell_id;     // cell being entered
+  int32_t surface_id;    // OpenMC surface ID (user-facing)
+  int32_t surface_index; // internal index into model::surfaces
+  double u_pos;          // exact position along the row in real-space cm
+  int32_t row;           // which pixel row (v pixel index)
+  int32_t from_cell_id;  // cell being left
+  int32_t to_cell_id;    // cell being entered
 };
 
 struct RasterData {
@@ -203,9 +203,15 @@ struct RasterData {
   // Vector for storing overlaps to later be flattened and sent through the API
   std::vector<std::vector<OverlapKey>> pixel_overlaps_;
 
-  // Vector for storing surface crossing information
+  // Vector for storing surface crossing information. Empty by default,
+  // populated on demand by plotter
   std::vector<std::vector<SurfaceCrossing>> surface_crossings_;
 
+  // cached plot params so surface crossings can be computed later
+  Position origin_;
+  Direction u_span_;
+  Direction v_span_;
+  std::array<size_t, 2> pixel_dims_;
 };
 
 //===============================================================================
@@ -591,14 +597,14 @@ private:
 // Class for running ray tracing on pots to get surface IDs
 class SliceRay : public Ray {
 public:
-    SliceRay(Position r, Direction u,
-             std::vector<SurfaceCrossing>& crossings)
-        : Ray(r, u), crossings_(crossings) {}
+  SliceRay(Position r, Direction u, std::vector<SurfaceCrossing>& crossings)
+    : Ray(r, u), crossings_(crossings)
+  {}
 
-    void on_intersection() override;
+  void on_intersection() override;
 
 private:
-    std::vector<SurfaceCrossing>& crossings_;
+  std::vector<SurfaceCrossing>& crossings_;
 };
 
 //===============================================================================

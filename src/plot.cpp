@@ -1904,41 +1904,41 @@ void PhongRay::on_intersection()
 
 void SliceRay::on_intersection()
 {
-    SurfaceCrossing sc;
-    sc.surface_index = boundary().surface_index();
-    sc.surface_id    = model::surfaces.at(sc.surface_index)->id_;
-    sc.u_pos         = traversal_distance_;
-    sc.from_cell_id  = model::cells.at(cell_last(0))->id_;
-    sc.to_cell_id    = model::cells.at(lowest_coord().cell())->id_;
-    crossings_.push_back(sc);
+  SurfaceCrossing sc;
+  sc.surface_index = boundary().surface_index();
+  sc.surface_id = model::surfaces.at(sc.surface_index)->id_;
+  sc.u_pos = traversal_distance_;
+  sc.from_cell_id = model::cells.at(cell_last(0))->id_;
+  sc.to_cell_id = model::cells.at(lowest_coord().cell())->id_;
+  crossings_.push_back(sc);
 }
 
 std::vector<std::vector<SurfaceCrossing>>
 SlicePlotBase::compute_surface_crossings() const
 {
-    size_t h_res = pixels_[0];
-    size_t v_res = pixels_[1];
+  size_t h_res = pixels_[0];
+  size_t v_res = pixels_[1];
 
-    // pre-allocate one inner vector per row — no mutex needed
-    std::vector<std::vector<SurfaceCrossing>> crossings_by_row(v_res);
+  // pre-allocate one inner vector per row — no mutex needed
+  std::vector<std::vector<SurfaceCrossing>> crossings_by_row(v_res);
 
-    // ray fires horizontally along u_span_ direction
-    Direction u_hat = u_span_ / u_span_.norm();
+  // ray fires horizontally along u_span_ direction
+  Direction u_hat = u_span_ / u_span_.norm();
 
-    // same row-start computation as get_map's pixel loop [5]
-    Direction v_step = v_span_ / static_cast<double>(v_res);
-    Position top_left = origin_ - 0.5 * u_span_ + 0.5 * v_span_;
+  // same row-start computation as get_map's pixel loop [5]
+  Direction v_step = v_span_ / static_cast<double>(v_res);
+  Position top_left = origin_ - 0.5 * u_span_ + 0.5 * v_span_;
 
-    #pragma omp parallel for
-    for (size_t row = 0; row < v_res; row++) {
-        // left edge of this row, same geometry as get_map
-        Position row_start = top_left - v_step * static_cast<double>(row);
+#pragma omp parallel for
+  for (size_t row = 0; row < v_res; row++) {
+    // left edge of this row, same geometry as get_map
+    Position row_start = top_left - v_step * static_cast<double>(row);
 
-        SliceRay ray(row_start, u_hat, crossings_by_row[row]);
-        ray.trace();  // calls on_intersection() at every boundary
-    }
+    SliceRay ray(row_start, u_hat, crossings_by_row[row]);
+    ray.trace(); // calls on_intersection() at every boundary
+  }
 
-    return crossings_by_row;
+  return crossings_by_row;
 }
 
 extern "C" int openmc_id_map(const void* plot, int32_t* data_out)
@@ -2057,10 +2057,15 @@ extern "C" int openmc_slice_data(const double origin[3], const double u_span[3],
         model::last_slice_data->property_data_.end(), property_data);
     }
 
+    model::last_slice_data->origin_ = plot_params.origin_;
+    model::last_slice_data->u_span_ = plot_params.u_span_;
+    model::last_slice_data->v_span_ = plot_params.v_span_;
+    model::last_slice_data->pixel_dims_ = {pixels[0], pixels[1]};
+
     // Only runs surface crossings if flag set
     if (compute_surface_crossings) {
-        model::last_slice_data->surface_crossings_ =
-            plot_params.compute_surface_crossings();
+      model::last_slice_data->surface_crossings_ =
+        plot_params.compute_surface_crossings();
     }
 
   } catch (const std::exception& e) {
@@ -2136,44 +2141,65 @@ extern "C" int openmc_slice_data_overlap_info(
   return 0;
 }
 
-// First call - Gets number of total surface crossings 
+// First call - Gets number of total surface crossings
 extern "C" int openmc_slice_surface_crossing_count(int32_t* count)
 {
-    if (!model::last_slice_data) {
-        set_errmsg("No slice data available.");
-        return OPENMC_E_UNASSIGNED;
-    }
-    int total = 0;
-    for (const auto& row : model::last_slice_data->surface_crossings_)
-        total += row.size();
-    *count = total;
-    return 0;
+  if (!model::last_slice_data) {
+    set_errmsg("No slice data available.");
+    return OPENMC_E_UNASSIGNED;
+  }
+  int total = 0;
+  for (const auto& row : model::last_slice_data->surface_crossings_)
+    total += row.size();
+  *count = total;
+  return 0;
 }
 
 // Second call — retrieve the actual data into pre-allocated arrays
-extern "C" int openmc_slice_surface_crossing_data(
-    int32_t* surface_ids,
-    double*  u_positions,
-    int32_t* row_indices,
-    int32_t* from_cell_ids,
-    int32_t* to_cell_ids)
+extern "C" int openmc_slice_surface_crossing_data(int32_t* surface_ids,
+  double* u_positions, int32_t* row_indices, int32_t* from_cell_ids,
+  int32_t* to_cell_ids)
 {
-    if (!model::last_slice_data) {
-        set_errmsg("No slice data available.");
-        return OPENMC_E_UNASSIGNED;
+  if (!model::last_slice_data) {
+    set_errmsg("No slice data available.");
+    return OPENMC_E_UNASSIGNED;
+  }
+  int i = 0;
+  for (int row = 0; row < model::last_slice_data->surface_crossings_.size();
+       row++) {
+    for (const auto& sc : model::last_slice_data->surface_crossings_[row]) {
+      surface_ids[i] = sc.surface_id;
+      u_positions[i] = sc.u_pos;
+      row_indices[i] = row;
+      from_cell_ids[i] = sc.from_cell_id;
+      to_cell_ids[i] = sc.to_cell_id;
+      i++;
     }
-    int i = 0;
-    for (int row = 0; row < model::last_slice_data->surface_crossings_.size(); row++) {
-        for (const auto& sc : model::last_slice_data->surface_crossings_[row]) {
-            surface_ids[i]  = sc.surface_id;
-            u_positions[i]  = sc.u_pos;
-            row_indices[i]  = row;
-            from_cell_ids[i] = sc.from_cell_id;
-            to_cell_ids[i]  = sc.to_cell_id;
-            i++;
-        }
-    }
-    return 0;
+  }
+  return 0;
+}
+
+// If user checks box for getting surfaces in the plotter,
+// it can be done without re-calling slice_data
+extern "C" int openmc_compute_surface_crossings()
+{
+  if (!model::last_slice_data) {
+    set_errmsg("No slice data available.");
+    return OPENMC_E_UNASSIGNED;
+  }
+
+  // Uses saved parameters from plot needed to get surface crossings
+  SlicePlotBase plot_params;
+  plot_params.origin_ = model::last_slice_data->origin_;
+  plot_params.u_span_ = model::last_slice_data->u_span_;
+  plot_params.v_span_ = model::last_slice_data->v_span_;
+  plot_params.pixels_[0] = model::last_slice_data->h_res_;
+  plot_params.pixels_[1] = model::last_slice_data->v_res_;
+
+  model::last_slice_data->surface_crossings_ =
+    plot_params.compute_surface_crossings();
+
+  return 0;
 }
 
 extern "C" int openmc_get_plot_index(int32_t id, int32_t* index)
