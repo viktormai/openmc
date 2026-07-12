@@ -597,14 +597,16 @@ private:
 // Class for running ray tracing on pots to get surface IDs
 class SliceRay : public Ray {
 public:
-  SliceRay(Position r, Direction u, std::vector<SurfaceCrossing>& crossings)
-    : Ray(r, u), crossings_(crossings)
-  {}
+  SliceRay(Position r, Direction u, std::vector<SurfaceCrossing>& crossings, int rowLength, double pixelWidth)
+    : Ray(r, u), crossings_(crossings), pixelWidth(pixelWidth)
+  {rowData.resize(rowLength);}
 
   void on_intersection() override;
 
 private:
   std::vector<SurfaceCrossing>& crossings_;
+  std::vector<int> rowData;
+  double pixelWidth;
 };
 
 //===============================================================================

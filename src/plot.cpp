@@ -1934,13 +1934,13 @@ SlicePlotBase::compute_surface_crossings() const
   size_t h_res = pixels_[0];
   size_t v_res = pixels_[1];
 
-  // pre-allocate one inner vector per row — no mutex needed
+  // pre-allocate one inner vector per row
   std::vector<std::vector<SurfaceCrossing>> crossings_by_row(v_res);
 
   // ray fires horizontally along u_span_ direction
   Direction u_hat = u_span_ / u_span_.norm();
 
-  // same row-start computation as get_map's pixel loop [5]
+  // same row-start computation as get_map's pixel loop
   Direction v_step = v_span_ / static_cast<double>(v_res);
   Position top_left = origin_ - 0.5 * u_span_ + 0.5 * v_span_;
 
