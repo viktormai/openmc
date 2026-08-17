@@ -177,19 +177,33 @@ struct PropertyData {
 
 struct RasterData {
   // Constructor
-  RasterData(size_t h_res, size_t v_res, bool include_filter = false);
+  RasterData(size_t h_res, size_t v_res, bool include_filter = false,
+    bool include_surface = false);
 
   // Methods
   void set_value(size_t y, size_t x, const Particle& p, int level,
     Filter* filter = nullptr, FilterMatch* match = nullptr);
   void set_overlap(size_t y, size_t x, int overlap_idx);
 
+  //! Record the id of a surface crossed within a pixel. No-op when the surface
+  //! channel was not requested, so callers need not check first.
+  void set_surface(size_t y, size_t x, int32_t surface_id);
+
+  //! Channel holding the surface id, or -1 if the channel is not included
+  int surface_channel() const
+  {
+    return include_surface_ ? (include_filter_ ? 4 : 3) : -1;
+  }
+
   // Members
-  tensor::Tensor<int32_t>
-    id_data_; //!< [v_res, h_res, 3 or 4]: cell, instance, mat, [filter_bin]
+  //! [v_res, h_res, 3 to 5]: cell, instance, mat, [filter_bin], [surface]. The
+  //! optional channels are appended in that order, so the surface channel is
+  //! index 3 without a filter and index 4 with one.
+  tensor::Tensor<int32_t> id_data_;
   tensor::Tensor<double>
-    property_data_;     //!< [v_res, h_res, 2]: temperature, density
-  bool include_filter_; //!< Whether filter bin index is included
+    property_data_;      //!< [v_res, h_res, 2]: temperature, density
+  bool include_filter_;  //!< Whether filter bin index is included
+  bool include_surface_; //!< Whether surface crossing id is included
 };
 
 //===============================================================================
@@ -576,7 +590,8 @@ private:
 
 class SliceRay : public Ray {
 public:
-  // No crossings vector — sentinel written directly into id_data_
+  // No crossings vector — surface ids are written directly into the surface
+  // channel of id_data_ as the ray encounters them.
   SliceRay(Position r, Direction u, RasterData& data, size_t row, size_t h_res,
     double pixel_w, int level, Filter* filter, bool show_overlaps)
     : Ray(r, u), data_(data), row_(row), h_res_(h_res), pixel_w_(pixel_w),
@@ -591,11 +606,34 @@ public:
   void finish();
 
 private:
+  // Column whose extent contains a point `dist` from the left edge. Used to
+  // record a surface crossing on the pixel the surface falls inside.
+  // Returns h_res_ (out of range) if the point lies past the right edge: the
+  // ray keeps crossing surfaces long after it leaves the frame, so those
+  // crossings must be dropped rather than clamped onto the last column.
   size_t pixel_col(double dist) const
   {
     if (dist < 0.0)
       dist = 0.0;
-    return std::min(static_cast<size_t>(dist / pixel_w_), h_res_ - 1);
+    double col = dist / pixel_w_;
+    if (col >= static_cast<double>(h_res_))
+      return h_res_;
+    return static_cast<size_t>(col);
+  }
+
+  // First column whose *center* lies at or past a boundary `dist` from the left
+  // edge, i.e. the first column belonging to the segment after that boundary.
+  // get_map samples pixel centers at (col + 0.5) * pixel_w, so the split point
+  // is ceil(dist / pixel_w - 0.5); binning on the containing pixel instead
+  // would shift every boundary up to a full pixel to the right.
+  size_t boundary_col(double dist) const
+  {
+    double col = std::ceil(dist / pixel_w_ - 0.5);
+    if (col < 0.0)
+      return 0;
+    if (col > static_cast<double>(h_res_))
+      return h_res_;
+    return static_cast<size_t>(col);
   }
 
   // Distance along the ray direction from the image's left edge (r0_) to the
@@ -631,7 +669,10 @@ inline RasterData SlicePlotBase::get_map_raytrace(int32_t filter_index) const
   Filter* filter =
     include_filter ? model::tally_filters[filter_index].get() : nullptr;
 
-  RasterData data(h_res, v_res, include_filter);
+  // The raytrace path knows exactly where each surface crossing lands, so it
+  // records them in a dedicated trailing channel. get_map cannot, and so does
+  // not allocate one.
+  RasterData data(h_res, v_res, include_filter, /*include_surface=*/true);
 
   // u_hat is the horizontal unit vector for this slice — identical to
   // what get_map uses for its inner pixel loop direction.
@@ -650,10 +691,12 @@ inline RasterData SlicePlotBase::get_map_raytrace(int32_t filter_index) const
 
 #pragma omp parallel for
   for (size_t row = 0; row < v_res; row++) {
-    // Each row fires one ray from the left edge across the full width.
-    // Ray::trace() calls on_intersection() automatically at every
-    // surface boundary — no additional work needed here.
-    Position row_start = top_left - v_step * static_cast<double>(row);
+    // Each row fires one ray from the left edge across the full width, through
+    // the vertical center of the row band. get_map samples pixel centers, so
+    // sampling the top edge here would both shift the image up by half a pixel
+    // and put rays exactly on plane boundaries whenever the pixel pitch divides
+    // evenly into a lattice pitch.
+    Position row_start = top_left - v_step * (static_cast<double>(row) + 0.5);
     try {
       SliceRay ray(row_start, u_hat, data, row, h_res, pixel_w, slice_level_,
         filter, show_overlaps_);
@@ -662,9 +705,13 @@ inline RasterData SlicePlotBase::get_map_raytrace(int32_t filter_index) const
       // on_intersection() (the ray either exited the model or ran to infinity
       // in an unbounded cell).
       ray.finish();
-    } catch (const std::exception&) {
-      // Lost ray — pixels for this row stay at NOT_FOUND,
-      // same behavior as get_map when exhaustive_find_cell fails
+    } catch (const std::exception& e) {
+      // Lost ray — the rest of this row stays at NOT_FOUND, same behavior as
+      // get_map when exhaustive_find_cell fails. Never rethrow: this is inside
+      // an OpenMP region. Warn rather than fail silently, since a blanked row
+      // is otherwise indistinguishable from legitimately empty geometry.
+      warning(fmt::format(
+        "Ray traced plot row {} failed and is incomplete: {}", row, e.what()));
     }
   }
 

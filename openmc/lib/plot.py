@@ -245,10 +245,29 @@ def slice_data_raytrace(origin, width=None, basis='xy', u_span=None,
                         level=None, filter=None, include_properties=True):
     """Raytrace-based equivalent for slice_data.
 
-    Returns geom_data and property_data with the same shapes as slice_data.
-    Surface crossing sentinels are encoded in geom_data[:,:,1] — any value
-    <= -10 is a crossing, and surface_id = -10 - val (i.e. val = -10 - surface_id).
-    No separate crossing call needed; just read geom_data on the Python side.
+    Instead of point sampling every pixel, this fires one ray per row across the
+    slice. As a byproduct it knows exactly where the ray crosses each surface,
+    which is returned in an extra trailing channel of ``geom_data``.
+
+    Takes the same arguments as :func:`slice_data`.
+
+    Returns
+    -------
+    geom_data : numpy.ndarray
+        Array of shape (v_res, h_res, 4) with int32 dtype containing
+        [cell_id, cell_instance, material_id, surface_id], or shape
+        (v_res, h_res, 5) containing
+        [cell_id, cell_instance, material_id, filter_bin, surface_id] when a
+        filter is provided. Channels ``[:, :, :3]`` are identical to those
+        returned by :func:`slice_data` for the same slice. The final channel
+        holds the id of a surface crossed within that pixel, or -2 where no
+        surface was crossed; select crossings with ``geom_data[..., -1] > 0``.
+        Lattice boundaries are not surfaces and are not recorded. Where more
+        than one crossing falls in a single pixel, the last one along the ray
+        is kept.
+    property_data : numpy.ndarray or None
+        Array of shape (v_res, h_res, 2) with float64 dtype containing
+        [temperature, density], or None if include_properties=False
     """
     # level handling : same as slice_data
     if level is None:
@@ -322,7 +341,10 @@ def slice_data_raytrace(origin, width=None, basis='xy', u_span=None,
         _dll.openmc_get_filter_index(filter.id, fi)
         filter_index = fi.value
 
-    n_geom_fields = 4 if filter is not None else 3
+    # One channel wider than slice_data: cell, instance, material, [filter bin],
+    # surface. Must stay in sync with RasterData's channel count in plot.cpp --
+    # C++ copies into this buffer without knowing its size.
+    n_geom_fields = (4 if filter is not None else 3) + 1
     geom_data = np.zeros((pixels[1], pixels[0], n_geom_fields), dtype=np.int32)
 
     property_data = None

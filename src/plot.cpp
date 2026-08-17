@@ -44,7 +44,6 @@ namespace openmc {
 constexpr int PLOT_LEVEL_LOWEST {-1}; //!< lower bound on plot universe level
 constexpr int32_t NOT_FOUND {-2};
 constexpr int32_t OVERLAP {-3};
-constexpr int32_t SURFACE_CROSSING_BASE {-10}; //! <= 10 is a surface crossing
 
 IdData::IdData(size_t h_res, size_t v_res, bool /*include_filter*/)
   : data_({v_res, h_res, 3}, NOT_FOUND)
@@ -101,10 +100,13 @@ void PropertyData::set_overlap(size_t y, size_t x, int /*overlap_idx*/)
 // RasterData implementation
 //==============================================================================
 
-RasterData::RasterData(size_t h_res, size_t v_res, bool include_filter)
-  : id_data_({v_res, h_res, include_filter ? 4u : 3u}, NOT_FOUND),
+RasterData::RasterData(
+  size_t h_res, size_t v_res, bool include_filter, bool include_surface)
+  : id_data_({v_res, h_res,
+                3u + (include_filter ? 1u : 0u) + (include_surface ? 1u : 0u)},
+      NOT_FOUND),
     property_data_({v_res, h_res, 2}, static_cast<double>(NOT_FOUND)),
-    include_filter_(include_filter)
+    include_filter_(include_filter), include_surface_(include_surface)
 {}
 
 void RasterData::set_value(size_t y, size_t x, const Particle& p, int level,
@@ -163,6 +165,13 @@ void RasterData::set_overlap(size_t y, size_t x, int overlap_idx)
 
   property_data_(y, x, 0) = OVERLAP;
   property_data_(y, x, 1) = OVERLAP;
+}
+
+void RasterData::set_surface(size_t y, size_t x, int32_t surface_id)
+{
+  if (!include_surface_)
+    return;
+  id_data_(y, x, surface_channel()) = surface_id;
 }
 
 //==============================================================================
@@ -1907,31 +1916,40 @@ void SliceRay::fill_segment(
   Particle p;
   static_cast<GeometryState&>(p) = seg;
 
+  // Match get_map: the requested level overrides the deepest level outright.
   int j = p.n_coord() - 1;
   if (level_ >= 0)
-    j = std::min(level_, j);
+    j = level_;
+
+  // All columns in a segment share one geometry state, so the overlap check
+  // only needs to run once rather than once per column.
+  int overlap_idx = show_overlaps_ ? check_cell_overlap(p, false) : -1;
 
   for (size_t col = col_start; col < col_end && col < h_res_; col++) {
-    if (show_overlaps_) {
-      auto overlap_idx = check_cell_overlap(p, false);
-      if (overlap_idx >= 0) {
-        data_.set_overlap(row_, col, overlap_idx);
-        continue;
-      }
-    }
     data_.set_value(row_, col, p, j, filter_, &match_);
+    // get_map writes the value first and then stamps the overlap over it.
+    if (overlap_idx >= 0) {
+      data_.set_overlap(row_, col, overlap_idx);
+    }
   }
 }
 
 void SliceRay::on_intersection()
 {
-  // Get the surface ID before we do anything else
-  int32_t surface_id = model::surfaces.at(boundary().surface_index())->id_;
+  // trace() calls this at every boundary, which includes lattice boundaries.
+  // A lattice crossing has no surface: distance_to_boundary() sets
+  // boundary().surface() to SURFACE_NONE and records the crossing in
+  // lattice_translation() instead. surface_index() would then be -1, so the
+  // lookup must be guarded. The segment fill and state snapshot below still
+  // have to run — only the surface id is skipped.
+  bool is_surface = (boundary().surface() != SURFACE_NONE);
+  int32_t surface_id =
+    is_surface ? model::surfaces[boundary().surface_index()]->id_ : 0;
 
-  // Column of this crossing, derived from the actual 3D position so that any
-  // void gap the ray advanced through before entering the model is accounted
-  // for (columns left of the model stay NOT_FOUND).
-  size_t col_now = pixel_col(u_offset());
+  // First column of the next segment, derived from the actual 3D position so
+  // that any void gap the ray advanced through before entering the model is
+  // accounted for (columns left of the model stay NOT_FOUND).
+  size_t col_now = boundary_col(u_offset());
 
   // Fill the segment the ray just traversed. The correct geometry for that
   // segment is the state *entering* it. trace() calls neighbor_list_find_cell()
@@ -1941,39 +1959,56 @@ void SliceRay::on_intersection()
   // snapshotted at the previous crossing (prev_state_). For the first segment
   // of a ray that started inside a cell (no prior crossing), reconstruct it
   // from the pre-crossing "_last" fields, which trace()/find_cell preserve.
-  // Fill up to and including the crossing column so that channels 0 (cell id)
-  // and 2 (material id) at the crossing pixel hold the just-traversed segment's
-  // data; the sentinel below then overwrites only channel 1. The next segment
-  // starts at col_now + 1 so it does not mess up the sentinel.
+  // The fill is exclusive of col_now: every pixel whose center lies before the
+  // crossing belongs to the traversed segment, and col_now is by construction
+  // the first pixel whose center lies at or past it.
   if (have_prev_) {
-    fill_segment(prev_col_, col_now + 1, prev_state_);
+    fill_segment(prev_col_, col_now, prev_state_);
   } else if (traversal_distance_ > 0.0) {
     GeometryState seg = static_cast<const GeometryState&>(*this);
     seg.n_coord() = n_coord_last();
     for (int i = 0; i < n_coord_last(); i++)
       seg.coord(i).cell() = cell_last(i);
     seg.material() = material_last();
-    fill_segment(0, col_now + 1, seg);
+    fill_segment(0, col_now, seg);
   }
   // else: first callback is the entry crossing from void (traversal_distance_
   // is still 0); nothing has been traversed yet, so only the snapshot below
   // runs and the void columns left of col_now stay NOT_FOUND.
 
-  // Write the surface crossing sentinel into channel 1 of the crossing pixel.
-  // Channel 0 (cell id) and channel 2 (material id) are left as written by
-  // fill_segment above — still valid and readable. Channel 1 is normally cell
-  // instance (always >= 0), so any value <= SURFACE_CROSSING_BASE is
-  // unambiguously a crossing sentinel.
-  // Recovery on the Python side: surface_id = SURFACE_CROSSING_BASE - val.
-  if (col_now < h_res_) {
-    data_.id_data_(row_, col_now, 1) = SURFACE_CROSSING_BASE - surface_id;
+  // Record the surface id in the surface channel of the pixel the crossing
+  // physically falls inside, which is not necessarily col_now. The cell,
+  // instance, and material channels are written independently by fill_segment
+  // above and below, so the crossing pixel keeps the same values a point sample
+  // would give it: the raytraced image is identical to get_map's, with the
+  // surface data carried alongside as a separate layer. Pixels with no crossing
+  // keep the NOT_FOUND the array was constructed with.
+  // Lattice crossings have no surface and record nothing.
+  // Crossings past the right edge of the image are dropped: pixel_col returns
+  // h_res_ for those, and stamping them would mark the last column of every row
+  // as a surface.
+  if (is_surface) {
+    size_t surface_col = pixel_col(u_offset());
+    if (surface_col < h_res_) {
+      data_.set_surface(row_, surface_col, surface_id);
+    }
   }
 
   // Snapshot the post-crossing state as the entering state of the next segment,
-  // which begins one column past the sentinel pixel.
+  // which begins at col_now.
   prev_state_ = static_cast<const GeometryState&>(*this);
-  prev_col_ = col_now + 1;
+  prev_col_ = col_now;
   have_prev_ = true;
+
+  // trace() runs to the edge of the model, not the edge of the image. Once a
+  // crossing lands past the right edge there is nothing left to rasterize, so
+  // stop rather than tracing the rest of the model for every row. The fill
+  // above already painted out to h_res_ (boundary_col clamps there), and
+  // finish() then sees prev_col_ == h_res_ and no-ops. Test on u_offset()
+  // rather than col_now, since a crossing inside the last pixel can give
+  // col_now == h_res_ while still deserving the surface id written above.
+  if (u_offset() >= static_cast<double>(h_res_) * pixel_w_)
+    stop();
 }
 
 void SliceRay::finish()
@@ -2119,11 +2154,20 @@ extern "C" int openmc_slice_data_raytrace(const double origin[3],
   bool color_overlaps, int level, int32_t filter_index, int32_t* geom_data,
   double* property_data)
 {
+  // Validate span vectors, matching openmc_slice_data
   Direction u_span_d {u_span[0], u_span[1], u_span[2]};
   Direction v_span_d {v_span[0], v_span[1], v_span[2]};
+  double u_norm = u_span_d.norm();
+  double v_norm = v_span_d.norm();
+  if (u_norm == 0.0 || v_norm == 0.0) {
+    set_errmsg("Slice span vectors must be non-zero.");
+    return OPENMC_E_INVALID_ARGUMENT;
+  }
 
-  if (u_span_d.norm() == 0.0 || v_span_d.norm() == 0.0) {
-    set_errmsg("Span vectors must be non-zero.");
+  constexpr double ORTHO_REL_TOL = 1e-10;
+  double dot = u_span_d.dot(v_span_d);
+  if (std::abs(dot) > ORTHO_REL_TOL * u_norm * v_norm) {
+    set_errmsg("Slice span vectors must be orthogonal.");
     return OPENMC_E_INVALID_ARGUMENT;
   }
 
@@ -2147,13 +2191,18 @@ extern "C" int openmc_slice_data_raytrace(const double origin[3],
     params.show_overlaps_ = color_overlaps;
     params.slice_level_ = level;
 
+    // Clear overlap data structures on new slice call
+    model::overlap_keys.clear();
+    model::overlap_key_index.clear();
+
     // One raytrace pass: fills pixel data AND collects surface crossings.
     // After this returns, data contains everything.
     RasterData data = params.get_map_raytrace(filter_index);
 
-    // Copy pixel arrays out to the caller's pre-allocated buffers.
-    // Same shapes as openmc_slice_data so nothing changes on the
-    // Python side except which function gets called.
+    // Copy pixel arrays out to the caller's pre-allocated buffers. geom_data
+    // must be one channel wider than for openmc_slice_data: the raytrace path
+    // appends a surface id channel after the cell/instance/material channels
+    // and the optional filter bin channel.
     std::copy(data.id_data_.begin(), data.id_data_.end(), geom_data);
 
     if (property_data != nullptr) {
