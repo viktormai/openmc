@@ -592,10 +592,15 @@ class SliceRay : public Ray {
 public:
   // No crossings vector — surface ids are written directly into the surface
   // channel of id_data_ as the ray encounters them.
+  // `p` is a scratch Particle owned by the caller and shared by every SliceRay
+  // on the same thread. It carries no state between segments — fill_segment
+  // overwrites its GeometryState on every call — but constructing one is
+  // expensive (see fill_segment), so it must not be created per ray.
   SliceRay(Position r, Direction u, RasterData& data, size_t row, size_t h_res,
-    double pixel_w, int level, Filter* filter, bool show_overlaps)
+    double pixel_w, int level, Filter* filter, bool show_overlaps, Particle& p)
     : Ray(r, u), data_(data), row_(row), h_res_(h_res), pixel_w_(pixel_w),
-      r0_(r), level_(level), filter_(filter), show_overlaps_(show_overlaps)
+      r0_(r), level_(level), filter_(filter), show_overlaps_(show_overlaps),
+      p_(p)
   {}
 
   void on_intersection() override;
@@ -658,6 +663,9 @@ private:
   Filter* filter_;
   FilterMatch match_;
   bool show_overlaps_;
+  //! Scratch Particle owned by the caller, shared across all rays on this
+  //! thread. Declared last so the member-init order matches the constructor.
+  Particle& p_;
 };
 
 inline RasterData SlicePlotBase::get_map_raytrace(int32_t filter_index) const
@@ -689,29 +697,40 @@ inline RasterData SlicePlotBase::get_map_raytrace(int32_t filter_index) const
   // used inside SliceRay to convert u_pos distances to column indices
   double pixel_w = u_span_.norm() / static_cast<double>(h_res);
 
-#pragma omp parallel for
-  for (size_t row = 0; row < v_res; row++) {
-    // Each row fires one ray from the left edge across the full width, through
-    // the vertical center of the row band. get_map samples pixel centers, so
-    // sampling the top edge here would both shift the image up by half a pixel
-    // and put rays exactly on plane boundaries whenever the pixel pitch divides
-    // evenly into a lattice pitch.
-    Position row_start = top_left - v_step * (static_cast<double>(row) + 0.5);
-    try {
-      SliceRay ray(row_start, u_hat, data, row, h_res, pixel_w, slice_level_,
-        filter, show_overlaps_);
-      ray.trace();
-      // Rasterize the final segment, which has no crossing to trigger
-      // on_intersection() (the ray either exited the model or ran to infinity
-      // in an unbounded cell).
-      ray.finish();
-    } catch (const std::exception& e) {
-      // Lost ray — the rest of this row stays at NOT_FOUND, same behavior as
-      // get_map when exhaustive_find_cell fails. Never rethrow: this is inside
-      // an OpenMP region. Warn rather than fail silently, since a blanked row
-      // is otherwise indistinguishable from legitimately empty geometry.
-      warning(fmt::format(
-        "Ray traced plot row {} failed and is incomplete: {}", row, e.what()));
+#pragma omp parallel
+  {
+    // One scratch Particle per thread, reused by every segment of every row the
+    // thread handles, exactly as get_map hoists its Particle out of the pixel
+    // loops. Constructing a Particle allocates and zeroes a cross section cache
+    // sized by the number of nuclides in the problem, which plotting never
+    // reads, so this must not happen per row or per segment.
+    Particle p;
+
+#pragma omp for schedule(dynamic)
+    for (size_t row = 0; row < v_res; row++) {
+      // Each row fires one ray from the left edge across the full width,
+      // through the vertical center of the row band. get_map samples pixel
+      // centers, so sampling the top edge here would both shift the image up by
+      // half a pixel and put rays exactly on plane boundaries whenever the pixel
+      // pitch divides evenly into a lattice pitch.
+      Position row_start = top_left - v_step * (static_cast<double>(row) + 0.5);
+      try {
+        SliceRay ray(row_start, u_hat, data, row, h_res, pixel_w, slice_level_,
+          filter, show_overlaps_, p);
+        ray.trace();
+        // Rasterize the final segment, which has no crossing to trigger
+        // on_intersection() (the ray either exited the model or ran to infinity
+        // in an unbounded cell).
+        ray.finish();
+      } catch (const std::exception& e) {
+        // Lost ray — the rest of this row stays at NOT_FOUND, same behavior as
+        // get_map when exhaustive_find_cell fails. Never rethrow: this is
+        // inside an OpenMP region. Warn rather than fail silently, since a
+        // blanked row is otherwise indistinguishable from legitimately empty
+        // geometry.
+        warning(fmt::format(
+          "Ray traced plot row {} failed and is incomplete: {}", row, e.what()));
+      }
     }
   }
 

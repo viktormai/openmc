@@ -1912,8 +1912,16 @@ void SliceRay::fill_segment(
   // Filter::get_all_bins, which is hard-typed to const Particle&). A SliceRay
   // is not a Particle, but both share the GeometryState base holding all the
   // fields set_value and the filters actually read. Copy the segment's geometry
-  // state into a Particle (all columns in a segment share the same geometry).
-  Particle p;
+  // state into the Particle (all columns in a segment share the same geometry).
+  //
+  // p_ is a scratch Particle owned by the enclosing parallel region, not a
+  // local: constructing a Particle allocates and value-initializes neutron_xs_
+  // (one entry per nuclide in the problem) plus several other caches that
+  // plotting never touches. Doing that once per segment cost more than the
+  // per-pixel cell search the ray trace exists to avoid. Nothing carries over
+  // between segments — the assignment below overwrites every field that
+  // set_value and the filters read.
+  Particle& p = p_;
   static_cast<GeometryState&>(p) = seg;
 
   // Match get_map: the requested level overrides the deepest level outright.
