@@ -46,8 +46,15 @@ constexpr int32_t NOT_FOUND {-2};
 constexpr int32_t OVERLAP {-3};
 
 IdData::IdData(size_t h_res, size_t v_res, bool /*include_filter*/)
-  : data_({v_res, h_res, 3}, NOT_FOUND)
+  : data_({v_res, h_res, 3})
 {}
+
+void IdData::init_row(size_t y)
+{
+  size_t stride = data_.shape(1) * data_.shape(2);
+  auto* row = data_.data() + y * stride;
+  std::fill(row, row + stride, NOT_FOUND);
+}
 
 void IdData::set_value(size_t y, size_t x, const Particle& p, int level,
   Filter* /*filter*/, FilterMatch* /*match*/)
@@ -80,8 +87,15 @@ void IdData::set_overlap(size_t y, size_t x, int /*overlap_idx*/)
 }
 
 PropertyData::PropertyData(size_t h_res, size_t v_res, bool /*include_filter*/)
-  : data_({v_res, h_res, 2}, NOT_FOUND)
+  : data_({v_res, h_res, 2})
 {}
+
+void PropertyData::init_row(size_t y)
+{
+  size_t stride = data_.shape(1) * data_.shape(2);
+  auto* row = data_.data() + y * stride;
+  std::fill(row, row + stride, static_cast<double>(NOT_FOUND));
+}
 
 void PropertyData::set_value(size_t y, size_t x, const Particle& p, int level,
   Filter* /*filter*/, FilterMatch* /*match*/)
@@ -100,57 +114,75 @@ void PropertyData::set_overlap(size_t y, size_t x, int /*overlap_idx*/)
 // RasterData implementation
 //==============================================================================
 
-RasterData::RasterData(
-  size_t h_res, size_t v_res, bool include_filter, bool include_surface)
-  : id_data_({v_res, h_res,
-                3u + (include_filter ? 1u : 0u) + (include_surface ? 1u : 0u)},
-      NOT_FOUND),
-    property_data_({v_res, h_res, 2}, static_cast<double>(NOT_FOUND)),
+RasterData::RasterData(int32_t* id_data, double* property_data, size_t h_res,
+  size_t v_res, bool include_filter, bool include_surface)
+  : id_data_(id_data), property_data_(property_data), h_res_(h_res),
+    v_res_(v_res),
+    n_id_channels_(3 + (include_filter ? 1 : 0) + (include_surface ? 1 : 0)),
     include_filter_(include_filter), include_surface_(include_surface)
 {}
+
+void RasterData::init_row(size_t y)
+{
+  size_t n_id = h_res_ * static_cast<size_t>(n_id_channels_);
+  int32_t* id = id_data_ + id_index(y, 0);
+  std::fill(id, id + n_id, NOT_FOUND);
+
+  if (property_data_) {
+    double* prop = property_data_ + property_index(y, 0);
+    std::fill(prop, prop + h_res_ * 2, static_cast<double>(NOT_FOUND));
+  }
+}
 
 void RasterData::set_value(size_t y, size_t x, const Particle& p, int level,
   Filter* filter, FilterMatch* match)
 {
+  int32_t* id = id_data_ + id_index(y, x);
+
   // set cell data
   if (p.n_coord() <= level) {
-    id_data_(y, x, 0) = NOT_FOUND;
-    id_data_(y, x, 1) = NOT_FOUND;
+    id[0] = NOT_FOUND;
+    id[1] = NOT_FOUND;
   } else {
-    id_data_(y, x, 0) = model::cells.at(p.coord(level).cell())->id_;
-    id_data_(y, x, 1) = level == p.n_coord() - 1
-                          ? p.cell_instance()
-                          : cell_instance_at_level(p, level);
+    id[0] = model::cells.at(p.coord(level).cell())->id_;
+    id[1] = level == p.n_coord() - 1 ? p.cell_instance()
+                                     : cell_instance_at_level(p, level);
   }
 
   // set material data
   Cell* c = model::cells.at(p.lowest_coord().cell()).get();
   if (p.material() == MATERIAL_VOID) {
-    id_data_(y, x, 2) = MATERIAL_VOID;
+    id[2] = MATERIAL_VOID;
   } else if (c->type_ == Fill::MATERIAL) {
     Material* m = model::materials.at(p.material()).get();
-    id_data_(y, x, 2) = m->id_;
+    id[2] = m->id_;
   }
 
   // set filter index (only if filter is being used)
   if (include_filter_ && filter) {
     filter->get_all_bins(p, TallyEstimator::COLLISION, *match);
     if (match->bins_.empty()) {
-      id_data_(y, x, 3) = -1;
+      id[3] = -1;
     } else {
-      id_data_(y, x, 3) = match->bins_[0];
+      id[3] = match->bins_[0];
     }
     match->bins_.clear();
     match->weights_.clear();
   }
 
-  // set temperature (in K)
-  property_data_(y, x, 0) = (p.sqrtkT() * p.sqrtkT()) / K_BOLTZMANN;
+  // Temperature and density are only computed when the caller supplied a
+  // buffer for them. They are two thirds of the per-pixel work, so a caller
+  // passing include_properties=False must not pay for them.
+  if (property_data_) {
+    double* prop = property_data_ + property_index(y, x);
 
-  // set density (g/cm³)
-  if (c->type_ != Fill::UNIVERSE && p.material() != MATERIAL_VOID) {
-    Material* m = model::materials.at(p.material()).get();
-    property_data_(y, x, 1) = c->density(p.cell_instance());
+    // set temperature (in K)
+    prop[0] = (p.sqrtkT() * p.sqrtkT()) / K_BOLTZMANN;
+
+    // set density (g/cm³)
+    if (c->type_ != Fill::UNIVERSE && p.material() != MATERIAL_VOID) {
+      prop[1] = c->density(p.cell_instance());
+    }
   }
 }
 
@@ -159,19 +191,58 @@ void RasterData::set_overlap(size_t y, size_t x, int overlap_idx)
   // Set cell, instance, and material to OVERLAP, but preserve filter bin for
   // tally plotting. Cell encodes the overlap index as a negative number so that
   // it can be used to look up overlap information in the plotter.
-  id_data_(y, x, 0) = OVERLAP - overlap_idx - 1;
-  id_data_(y, x, 1) = OVERLAP;
-  id_data_(y, x, 2) = OVERLAP;
+  int32_t* id = id_data_ + id_index(y, x);
+  id[0] = OVERLAP - overlap_idx - 1;
+  id[1] = OVERLAP;
+  id[2] = OVERLAP;
 
-  property_data_(y, x, 0) = OVERLAP;
-  property_data_(y, x, 1) = OVERLAP;
+  if (property_data_) {
+    double* prop = property_data_ + property_index(y, x);
+    prop[0] = OVERLAP;
+    prop[1] = OVERLAP;
+  }
+}
+
+void RasterData::fill_span(
+  size_t y, size_t x_start, size_t x_end, const PixelValue& v)
+{
+  if (x_start >= x_end)
+    return;
+
+  // The whole point of the ray trace is that this loop is the only per-pixel
+  // work: every value was resolved once by the caller. Walk raw pointers so
+  // that no member of *this is reloaded per store.
+  const size_t nc = static_cast<size_t>(n_id_channels_);
+  int32_t* id = id_data_ + id_index(y, x_start);
+  if (include_filter_) {
+    for (size_t x = x_start; x < x_end; x++, id += nc) {
+      id[0] = v.cell_id;
+      id[1] = v.cell_instance;
+      id[2] = v.material_id;
+      id[3] = v.filter_bin;
+    }
+  } else {
+    for (size_t x = x_start; x < x_end; x++, id += nc) {
+      id[0] = v.cell_id;
+      id[1] = v.cell_instance;
+      id[2] = v.material_id;
+    }
+  }
+
+  if (property_data_) {
+    double* prop = property_data_ + property_index(y, x_start);
+    for (size_t x = x_start; x < x_end; x++, prop += 2) {
+      prop[0] = v.temperature;
+      prop[1] = v.density;
+    }
+  }
 }
 
 void RasterData::set_surface(size_t y, size_t x, int32_t surface_id)
 {
   if (!include_surface_)
     return;
-  id_data_(y, x, surface_channel()) = surface_id;
+  id_data_[id_index(y, x) + surface_channel()] = surface_id;
 }
 
 //==============================================================================
@@ -1929,17 +2000,59 @@ void SliceRay::fill_segment(
   if (level_ >= 0)
     j = level_;
 
-  // All columns in a segment share one geometry state, so the overlap check
-  // only needs to run once rather than once per column.
-  int overlap_idx = show_overlaps_ ? check_cell_overlap(p, false) : -1;
+  // Every column in the segment shares one geometry state, so resolve the pixel
+  // value once here. Calling set_value per column instead would repeat the cell
+  // and material lookups, the virtual Cell::density call and the filter bin
+  // search for every pixel -- exactly the per-pixel work the ray trace exists to
+  // avoid. Fields the point-sampling path would have left untouched stay at
+  // NOT_FOUND, which is what init_row wrote.
+  PixelValue v {NOT_FOUND, NOT_FOUND, NOT_FOUND, NOT_FOUND,
+    static_cast<double>(NOT_FOUND), static_cast<double>(NOT_FOUND)};
 
-  for (size_t col = col_start; col < col_end && col < h_res_; col++) {
-    data_.set_value(row_, col, p, j, filter_, &match_);
-    // get_map writes the value first and then stamps the overlap over it.
-    if (overlap_idx >= 0) {
-      data_.set_overlap(row_, col, overlap_idx);
+  if (p.n_coord() > j) {
+    v.cell_id = model::cells.at(p.coord(j).cell())->id_;
+    v.cell_instance =
+      j == p.n_coord() - 1 ? p.cell_instance() : cell_instance_at_level(p, j);
+  }
+
+  Cell* c = model::cells.at(p.lowest_coord().cell()).get();
+  if (p.material() == MATERIAL_VOID) {
+    v.material_id = MATERIAL_VOID;
+  } else if (c->type_ == Fill::MATERIAL) {
+    v.material_id = model::materials.at(p.material())->id_;
+  }
+
+  if (filter_) {
+    filter_->get_all_bins(p, TallyEstimator::COLLISION, match_);
+    v.filter_bin = match_.bins_.empty() ? -1 : match_.bins_[0];
+    match_.bins_.clear();
+    match_.weights_.clear();
+  }
+
+  if (data_.include_properties()) {
+    v.temperature = (p.sqrtkT() * p.sqrtkT()) / K_BOLTZMANN;
+    if (c->type_ != Fill::UNIVERSE && p.material() != MATERIAL_VOID) {
+      v.density = c->density(p.cell_instance());
     }
   }
+
+  // All columns in a segment share one geometry state, so the overlap check
+  // only needs to run once rather than once per column. get_map writes the
+  // value first and then stamps the overlap over it; folding the stamp into the
+  // resolved value here is equivalent, and preserves the filter bin the same
+  // way set_overlap does.
+  if (show_overlaps_) {
+    int overlap_idx = check_cell_overlap(p, false);
+    if (overlap_idx >= 0) {
+      v.cell_id = OVERLAP - overlap_idx - 1;
+      v.cell_instance = OVERLAP;
+      v.material_id = OVERLAP;
+      v.temperature = OVERLAP;
+      v.density = OVERLAP;
+    }
+  }
+
+  data_.fill_span(row_, col_start, std::min(col_end, h_res_), v);
 }
 
 void SliceRay::on_intersection()
@@ -2023,7 +2136,11 @@ void SliceRay::finish()
 {
   // Determine whether the ray's final position is inside the model. find_cell()
   // leaves a stale cell index behind when a ray exits, so probe explicitly.
-  GeometryState probe = static_cast<const GeometryState&>(*this);
+  // probe_ is the caller's per-thread scratch rather than a local: constructing
+  // a GeometryState allocates its two coordinate vectors, and this runs once
+  // per row.
+  GeometryState& probe = probe_;
+  probe = static_cast<const GeometryState&>(*this);
   if (!exhaustive_find_cell(probe, false)) {
     // Ray exited the model: everything past the last crossing is void.
     return;
@@ -2140,15 +2257,13 @@ extern "C" int openmc_slice_data(const double origin[3], const double u_span[3],
     model::overlap_keys.clear();
     model::overlap_key_index.clear();
 
-    // Use get_map<RasterData> to generate data
-    auto data = plot_params.get_map<RasterData>(filter_index);
-    std::copy(data.id_data_.begin(), data.id_data_.end(), geom_data);
-
-    // Copy property data if requested
-    if (property_data != nullptr) {
-      std::copy(
-        data.property_data_.begin(), data.property_data_.end(), property_data);
-    }
+    // Fill the caller's arrays in place. RasterData owns no storage, so there
+    // is no interior copy of the image to allocate, zero and memcpy out -- all
+    // of which would be serial and, at high thread counts, would dominate the
+    // runtime of this call.
+    RasterData data(geom_data, property_data, pixels[0], pixels[1],
+      filter_index >= 0, /*include_surface=*/false);
+    plot_params.fill_map(data, filter_index);
   } catch (const std::exception& e) {
     set_errmsg(e.what());
     return OPENMC_E_UNASSIGNED;
@@ -2203,20 +2318,14 @@ extern "C" int openmc_slice_data_raytrace(const double origin[3],
     model::overlap_keys.clear();
     model::overlap_key_index.clear();
 
-    // One raytrace pass: fills pixel data AND collects surface crossings.
-    // After this returns, data contains everything.
-    RasterData data = params.get_map_raytrace(filter_index);
-
-    // Copy pixel arrays out to the caller's pre-allocated buffers. geom_data
-    // must be one channel wider than for openmc_slice_data: the raytrace path
-    // appends a surface id channel after the cell/instance/material channels
-    // and the optional filter bin channel.
-    std::copy(data.id_data_.begin(), data.id_data_.end(), geom_data);
-
-    if (property_data != nullptr) {
-      std::copy(
-        data.property_data_.begin(), data.property_data_.end(), property_data);
-    }
+    // One raytrace pass, writing straight into the caller's pre-allocated
+    // buffers: it fills pixel data AND collects surface crossings. geom_data
+    // must be one channel wider than for openmc_slice_data, since the raytrace
+    // path appends a surface id channel after the cell/instance/material
+    // channels and the optional filter bin channel.
+    RasterData data(geom_data, property_data, pixels[0], pixels[1],
+      filter_index >= 0, /*include_surface=*/true);
+    params.get_map_raytrace(data, filter_index);
 
   } catch (const std::exception& e) {
     set_errmsg(e.what());

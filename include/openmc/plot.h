@@ -158,6 +158,11 @@ struct IdData {
     Filter* filter = nullptr, FilterMatch* match = nullptr);
   void set_overlap(size_t y, size_t x, int overlap_idx);
 
+  //! Set one row to NOT_FOUND. Called from inside the parallel region by the
+  //! thread that goes on to write that row, so the pages are first touched on
+  //! the NUMA node that uses them.
+  void init_row(size_t y);
+
   // Members
   tensor::Tensor<int32_t> data_; //!< 2D array of cell & material ids
 };
@@ -171,14 +176,48 @@ struct PropertyData {
     Filter* filter = nullptr, FilterMatch* match = nullptr);
   void set_overlap(size_t y, size_t x, int overlap_idx);
 
+  //! Set one row to NOT_FOUND. See IdData::init_row.
+  void init_row(size_t y);
+
   // Members
   tensor::Tensor<double> data_; //!< 2D array of temperature & density data
 };
 
+//! The values every pixel of a run shares when that run maps to a single
+//! geometry state.
+//!
+//! The ray trace path knows that a whole segment of a row lies in one cell, so
+//! it resolves the cell, material, filter bin, temperature and density once and
+//! paints the span with them. A field left at NOT_FOUND is written as
+//! NOT_FOUND, which is what RasterData::set_value produced by leaving that
+//! channel untouched over a freshly initialized row.
+struct PixelValue {
+  int32_t cell_id;
+  int32_t cell_instance;
+  int32_t material_id;
+  int32_t filter_bin;
+  double temperature;
+  double density;
+};
+
+//! Writes slice geometry and property data into caller-supplied buffers.
+//!
+//! Unlike IdData and PropertyData, this type owns no storage: it wraps the
+//! arrays the C API caller already allocated. Slice images are large -- a
+//! 2560x2560 slice is ~105 MB per array -- so allocating a second copy inside
+//! the library and memcpy-ing it out at the end cost more wall clock than the
+//! ray trace itself, and being serial it put a hard floor under the thread
+//! scaling of both slice paths.
 struct RasterData {
-  // Constructor
-  RasterData(size_t h_res, size_t v_res, bool include_filter = false,
-    bool include_surface = false);
+  //! \param id_data [v_res, h_res, n_id_channels()] int32 buffer holding
+  //!   cell, instance, mat, [filter_bin], [surface]. The optional channels are
+  //!   appended in that order, so the surface channel is index 3 without a
+  //!   filter and index 4 with one.
+  //! \param property_data [v_res, h_res, 2] double buffer holding temperature
+  //!   and density, or nullptr when the caller did not ask for them. When it is
+  //!   null neither value is computed, which is most of the cost of a pixel.
+  RasterData(int32_t* id_data, double* property_data, size_t h_res,
+    size_t v_res, bool include_filter, bool include_surface);
 
   // Methods
   void set_value(size_t y, size_t x, const Particle& p, int level,
@@ -189,19 +228,48 @@ struct RasterData {
   //! channel was not requested, so callers need not check first.
   void set_surface(size_t y, size_t x, int32_t surface_id);
 
+  //! Paint columns [x_start, x_end) of row y with one already-resolved value.
+  //! The surface channel is deliberately left alone: it is written
+  //! independently by set_surface, and the span covering a crossing pixel is
+  //! filled after that crossing is recorded.
+  void fill_span(size_t y, size_t x_start, size_t x_end, const PixelValue& v);
+
+  //! Set one row of both buffers to NOT_FOUND. Called from inside the parallel
+  //! region by the thread that goes on to write that row, so the pages are
+  //! first touched on the NUMA node that uses them rather than all landing on
+  //! the master thread's node.
+  void init_row(size_t y);
+
   //! Channel holding the surface id, or -1 if the channel is not included
   int surface_channel() const
   {
     return include_surface_ ? (include_filter_ ? 4 : 3) : -1;
   }
 
-  // Members
-  //! [v_res, h_res, 3 to 5]: cell, instance, mat, [filter_bin], [surface]. The
-  //! optional channels are appended in that order, so the surface channel is
-  //! index 3 without a filter and index 4 with one.
-  tensor::Tensor<int32_t> id_data_;
-  tensor::Tensor<double>
-    property_data_;      //!< [v_res, h_res, 2]: temperature, density
+  //! Whether the caller asked for temperature and density
+  bool include_properties() const { return property_data_ != nullptr; }
+
+  //! Shape of the buffers, so callers that write through this object can check
+  //! it matches the region they are about to rasterize
+  size_t h_res() const { return h_res_; }
+  size_t v_res() const { return v_res_; }
+
+private:
+  size_t id_index(size_t y, size_t x) const
+  {
+    return (y * h_res_ + x) * static_cast<size_t>(n_id_channels_);
+  }
+  size_t property_index(size_t y, size_t x) const
+  {
+    return (y * h_res_ + x) * 2;
+  }
+
+  // Members. Not owned -- these point into the caller's arrays.
+  int32_t* id_data_;
+  double* property_data_;
+  size_t h_res_;
+  size_t v_res_;
+  int n_id_channels_;
   bool include_filter_;  //!< Whether filter bin index is included
   bool include_surface_; //!< Whether surface crossing id is included
 };
@@ -215,8 +283,14 @@ public:
   template<class T>
   T get_map(int32_t filter_index = -1) const;
 
-  // Ray tracing version of get_map for plotting
-  RasterData get_map_raytrace(int32_t filter_index = -1) const;
+  //! Fill an already-constructed map. Split out of get_map so that RasterData,
+  //! which wraps buffers owned by the C API caller, can be constructed by that
+  //! caller instead of being allocated and copied out here.
+  template<class T>
+  void fill_map(T& data, int32_t filter_index) const;
+
+  // Ray tracing version of fill_map for plotting
+  void get_map_raytrace(RasterData& data, int32_t filter_index = -1) const;
 
   enum class PlotBasis { xy = 1, xz = 2, yz = 3 };
 
@@ -239,6 +313,14 @@ private:
 template<class T>
 T SlicePlotBase::get_map(int32_t filter_index) const
 {
+  T data(pixels_[0], pixels_[1], filter_index >= 0);
+  fill_map(data, filter_index);
+  return data;
+}
+
+template<class T>
+void SlicePlotBase::fill_map(T& data, int32_t filter_index) const
+{
 
   size_t width = pixels_[0];
   size_t height = pixels_[1];
@@ -249,9 +331,6 @@ T SlicePlotBase::get_map(int32_t filter_index) const
   if (include_filter) {
     filter = model::tally_filters[filter_index].get();
   }
-
-  // size data array
-  T data(width, height, include_filter);
 
   // compute pixel steps and top-left pixel center
   Direction u_step = u_span_ / static_cast<double>(width);
@@ -281,7 +360,16 @@ T SlicePlotBase::get_map(int32_t filter_index) const
     int j {};
     FilterMatch match;
 
-#pragma omp for
+    // Initialize the output in parallel, with the same static decomposition as
+    // the pixel loop below, so that every page is first touched by the thread
+    // that will write it. A serial fill here would put the whole image on one
+    // NUMA node and make every store from the other nodes remote.
+#pragma omp for schedule(static)
+    for (int y = 0; y < height; y++) {
+      data.init_row(y);
+    }
+
+#pragma omp for schedule(static)
     for (int y = 0; y < height; y++) {
       Position row = start - v_step * static_cast<double>(y);
       for (int x = 0; x < width; x++) {
@@ -305,8 +393,6 @@ T SlicePlotBase::get_map(int32_t filter_index) const
       } // inner for
     }
   }
-
-  return data;
 }
 
 // Represents either a voxel or pixel plot
@@ -597,10 +683,11 @@ public:
   // overwrites its GeometryState on every call — but constructing one is
   // expensive (see fill_segment), so it must not be created per ray.
   SliceRay(Position r, Direction u, RasterData& data, size_t row, size_t h_res,
-    double pixel_w, int level, Filter* filter, bool show_overlaps, Particle& p)
+    double pixel_w, int level, Filter* filter, bool show_overlaps, Particle& p,
+    GeometryState& probe)
     : Ray(r, u), data_(data), row_(row), h_res_(h_res), pixel_w_(pixel_w),
       r0_(r), level_(level), filter_(filter), show_overlaps_(show_overlaps),
-      p_(p)
+      p_(p), probe_(probe)
   {}
 
   void on_intersection() override;
@@ -666,21 +753,27 @@ private:
   //! Scratch Particle owned by the caller, shared across all rays on this
   //! thread. Declared last so the member-init order matches the constructor.
   Particle& p_;
+  //! Scratch GeometryState owned by the caller, used only by finish().
+  GeometryState& probe_;
 };
 
-inline RasterData SlicePlotBase::get_map_raytrace(int32_t filter_index) const
+inline void SlicePlotBase::get_map_raytrace(
+  RasterData& data, int32_t filter_index) const
 {
   size_t h_res = pixels_[0];
   size_t v_res = pixels_[1];
 
+  // The data object writes straight into the caller's arrays, so a shape
+  // mismatch would silently run off the end of them rather than being caught by
+  // a truncated copy. Fail loudly instead.
+  if (data.h_res() != h_res || data.v_res() != v_res) {
+    fatal_error("Slice output buffer shape does not match the requested pixel "
+                "resolution.");
+  }
+
   bool include_filter = (filter_index >= 0);
   Filter* filter =
     include_filter ? model::tally_filters[filter_index].get() : nullptr;
-
-  // The raytrace path knows exactly where each surface crossing lands, so it
-  // records them in a dedicated trailing channel. get_map cannot, and so does
-  // not allocate one.
-  RasterData data(h_res, v_res, include_filter, /*include_surface=*/true);
 
   // u_hat is the horizontal unit vector for this slice — identical to
   // what get_map uses for its inner pixel loop direction.
@@ -706,7 +799,26 @@ inline RasterData SlicePlotBase::get_map_raytrace(int32_t filter_index) const
     // reads, so this must not happen per row or per segment.
     Particle p;
 
-#pragma omp for schedule(dynamic)
+    // Scratch state for SliceRay::finish(), hoisted for the same reason as the
+    // Particle above: GeometryState owns two heap vectors, so copy-constructing
+    // one per row means two allocations per row.
+    GeometryState probe;
+
+    // Initialize the output in parallel, with the same static decomposition as
+    // the trace loop below, so that every page is first touched by the thread
+    // that will write it. A serial fill here would put the whole image on one
+    // NUMA node and make every store from the other nodes remote -- which is
+    // why this path used to get *slower* going from 32 to 64 threads.
+#pragma omp for schedule(static)
+    for (size_t row = 0; row < v_res; row++) {
+      data.init_row(row);
+    }
+
+    // schedule(static) rather than dynamic so the row-to-thread mapping matches
+    // the initialization loop above. If rows ever turn out to be badly
+    // imbalanced, use schedule(static, N): that interleaves rows while still
+    // giving both loops the same mapping.
+#pragma omp for schedule(static)
     for (size_t row = 0; row < v_res; row++) {
       // Each row fires one ray from the left edge across the full width,
       // through the vertical center of the row band. get_map samples pixel
@@ -716,7 +828,7 @@ inline RasterData SlicePlotBase::get_map_raytrace(int32_t filter_index) const
       Position row_start = top_left - v_step * (static_cast<double>(row) + 0.5);
       try {
         SliceRay ray(row_start, u_hat, data, row, h_res, pixel_w, slice_level_,
-          filter, show_overlaps_, p);
+          filter, show_overlaps_, p, probe);
         ray.trace();
         // Rasterize the final segment, which has no crossing to trigger
         // on_intersection() (the ray either exited the model or ran to infinity
@@ -733,8 +845,6 @@ inline RasterData SlicePlotBase::get_map_raytrace(int32_t filter_index) const
       }
     }
   }
-
-  return data;
 }
 
 //===============================================================================
