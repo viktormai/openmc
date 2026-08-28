@@ -175,6 +175,15 @@ struct PropertyData {
   tensor::Tensor<double> data_; //!< 2D array of temperature & density data
 };
 
+struct PixelValue {
+  int32_t cell_id;
+  int32_t cell_instance;
+  int32_t material_id;
+  int32_t filter_bin;
+  double temperature;
+  double density;
+};
+
 struct RasterData {
   // Constructor
   RasterData(size_t h_res, size_t v_res, bool include_filter = false,
@@ -184,6 +193,7 @@ struct RasterData {
   void set_value(size_t y, size_t x, const Particle& p, int level,
     Filter* filter = nullptr, FilterMatch* match = nullptr);
   void set_overlap(size_t y, size_t x, int overlap_idx);
+  void fill_span(size_t y, size_t x_start, size_t x_end, const PixelValue& value);
 
   //! Record the id of a surface crossed within a pixel. No-op when the surface
   //! channel was not requested, so callers need not check first.
@@ -593,9 +603,11 @@ public:
   // No crossings vector — surface ids are written directly into the surface
   // channel of id_data_ as the ray encounters them.
   SliceRay(Position r, Direction u, RasterData& data, size_t row, size_t h_res,
-    double pixel_w, int level, Filter* filter, bool show_overlaps)
+    double pixel_w, int level, Filter* filter, bool show_overlaps, Particle& p,
+    GeometryState& probe)
     : Ray(r, u), data_(data), row_(row), h_res_(h_res), pixel_w_(pixel_w),
-      r0_(r), level_(level), filter_(filter), show_overlaps_(show_overlaps)
+      r0_(r), level_(level), filter_(filter), show_overlaps_(show_overlaps),
+      probe_(probe)
   {}
 
   void on_intersection() override;
@@ -658,6 +670,7 @@ private:
   Filter* filter_;
   FilterMatch match_;
   bool show_overlaps_;
+  GeometryState& probe_;
 };
 
 inline RasterData SlicePlotBase::get_map_raytrace(int32_t filter_index) const
@@ -689,6 +702,11 @@ inline RasterData SlicePlotBase::get_map_raytrace(int32_t filter_index) const
   // used inside SliceRay to convert u_pos distances to column indices
   double pixel_w = u_span_.norm() / static_cast<double>(h_res);
 
+  // Reuse one GeometryState scratch object for all rays handled by this
+  // OpenMP thread. GeometryState owns heap-backed vectors, so constructing it
+  // once per row can otherwise cause repeated allocations.
+  GeometryState probe;
+
 #pragma omp parallel for
   for (size_t row = 0; row < v_res; row++) {
     // Each row fires one ray from the left edge across the full width, through
@@ -698,8 +716,9 @@ inline RasterData SlicePlotBase::get_map_raytrace(int32_t filter_index) const
     // evenly into a lattice pitch.
     Position row_start = top_left - v_step * (static_cast<double>(row) + 0.5);
     try {
+      Particle p;
       SliceRay ray(row_start, u_hat, data, row, h_res, pixel_w, slice_level_,
-        filter, show_overlaps_);
+        filter, show_overlaps_, p, probe);
       ray.trace();
       // Rasterize the final segment, which has no crossing to trigger
       // on_intersection() (the ray either exited the model or ran to infinity

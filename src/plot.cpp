@@ -174,6 +174,31 @@ void RasterData::set_surface(size_t y, size_t x, int32_t surface_id)
   id_data_(y, x, surface_channel()) = surface_id;
 }
 
+void RasterData::fill_span(
+  size_t y, size_t x_start, size_t x_end, const PixelValue& value)
+{
+  if (x_start >= x_end)
+    return;
+
+  // Do not write past the end of the row.
+  x_end = std::min(x_end, id_data_.shape(1));
+
+  for (size_t x = x_start; x < x_end; x++) {
+    id_data_(y, x, 0) = value.cell_id;
+    id_data_(y, x, 1) = value.cell_instance;
+    id_data_(y, x, 2) = value.material_id;
+
+    if (include_filter_) {
+      id_data_(y, x, 3) = value.filter_bin;
+    }
+
+    if (property_data_.size() != 0) {
+      property_data_(y, x, 0) = value.temperature;
+      property_data_(y, x, 1) = value.density;
+    }
+  }
+}
+
 //==============================================================================
 // Global variables
 //==============================================================================
@@ -1921,17 +1946,66 @@ void SliceRay::fill_segment(
   if (level_ >= 0)
     j = level_;
 
-  // All columns in a segment share one geometry state, so the overlap check
-  // only needs to run once rather than once per column.
-  int overlap_idx = show_overlaps_ ? check_cell_overlap(p, false) : -1;
+  // All pixels in this segment share the same geometry state. Resolve the
+  // cell, material, filter, temperature, and density once, then paint the
+  // entire segment with the resulting value.
+  PixelValue value {
+    NOT_FOUND,
+    NOT_FOUND,
+    NOT_FOUND,
+    NOT_FOUND,
+    static_cast<double>(NOT_FOUND),
+    static_cast<double>(NOT_FOUND)
+  };
 
-  for (size_t col = col_start; col < col_end && col < h_res_; col++) {
-    data_.set_value(row_, col, p, j, filter_, &match_);
-    // get_map writes the value first and then stamps the overlap over it.
+  if (p.n_coord() > j) {
+    value.cell_id = model::cells.at(p.coord(j).cell())->id_;
+    value.cell_instance =
+      j == p.n_coord() - 1
+        ? p.cell_instance()
+        : cell_instance_at_level(p, j);
+  }
+
+  Cell* c = model::cells.at(p.lowest_coord().cell()).get();
+
+  if (p.material() == MATERIAL_VOID) {
+    value.material_id = MATERIAL_VOID;
+  } else if (c->type_ == Fill::MATERIAL) {
+    value.material_id = model::materials.at(p.material())->id_;
+  }
+
+  if (filter_) {
+    filter_->get_all_bins(p, TallyEstimator::COLLISION, match_);
+    value.filter_bin = match_.bins_.empty() ? -1 : match_.bins_[0];
+    match_.bins_.clear();
+    match_.weights_.clear();
+  }
+
+  value.temperature =
+    (p.sqrtkT() * p.sqrtkT()) / K_BOLTZMANN;
+
+  if (c->type_ != Fill::UNIVERSE && p.material() != MATERIAL_VOID) {
+    value.density = c->density(p.cell_instance());
+  }
+
+  // Resolve overlap once for the whole segment. The filter bin is preserved,
+  // matching the behavior of set_overlap().
+  if (show_overlaps_) {
+    int overlap_idx = check_cell_overlap(p, false);
     if (overlap_idx >= 0) {
-      data_.set_overlap(row_, col, overlap_idx);
+      value.cell_id = OVERLAP - overlap_idx - 1;
+      value.cell_instance = OVERLAP;
+      value.material_id = OVERLAP;
+      value.temperature = OVERLAP;
+      value.density = OVERLAP;
     }
   }
+
+  data_.fill_span(
+    row_,
+    col_start,
+    std::min(col_end, h_res_),
+    value);
 }
 
 void SliceRay::on_intersection()
@@ -2015,7 +2089,11 @@ void SliceRay::finish()
 {
   // Determine whether the ray's final position is inside the model. find_cell()
   // leaves a stale cell index behind when a ray exits, so probe explicitly.
-  GeometryState probe = static_cast<const GeometryState&>(*this);
+  // Reuse the per-thread scratch GeometryState instead of constructing one
+  // for every ray/row.
+  GeometryState& probe = probe_;
+  probe = static_cast<const GeometryState&>(*this);
+
   if (!exhaustive_find_cell(probe, false)) {
     // Ray exited the model: everything past the last crossing is void.
     return;
